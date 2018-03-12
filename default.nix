@@ -4,7 +4,7 @@
 }:
 
 let
-  inherit (pkgs) stdenv lib fetchurl linkFarm;
+  inherit (pkgs) stdenv lib fetchurl git linkFarm;
 in rec {
   # Export yarn again to make it easier to find out which yarn was used.
   inherit yarn;
@@ -19,11 +19,34 @@ in rec {
 
   # Loads the generated offline cache. This will be used by yarn as
   # the package source.
-  importOfflineCache = yarnNix:
+  importOfflineCache = packageJSON: yarnLock: # yarnNix:
     let
-      pkg = import yarnNix { inherit fetchurl linkFarm; };
+      pkg = "foo"; #import yarnNix { inherit fetchurl fetchgit linkFarm; };
     in
-      pkg.offline_cache;
+      #pkg.offline_cache;
+      stdenv.mkDerivation {
+        name = "yarn2nix-offline-cache";
+
+        nativeBuildInputs = [ nodejs yarn git ];
+
+        phases = [ "buildPhase" ];
+
+        outputHashAlgo = "sha256";
+        outputHashMode = "recursive";
+        outputHash = "1paw7sbhd746q0x84wx0z5vdgbz209x5zkkx3wzn1g8ibw8nqb0m";
+
+        buildPhase = ''
+          export HOME=$PWD/yarn_home
+          mkdir -p $out
+          yarn config --offline set yarn-offline-mirror $out
+          mkdir src
+          cd src
+          cp ${packageJSON} package.json
+          cp ${yarnLock} yarn.lock
+          chmod +w package.json yarn.lock
+          yarn install --ignore-scripts --ignore-engines --frozen-lockfile
+        '';
+      };
 
   defaultYarnFlags = [
     "--offline"
@@ -42,7 +65,7 @@ in rec {
     preBuild ? "",
   }:
     let
-      offlineCache = importOfflineCache yarnNix;
+      offlineCache = importOfflineCache packageJSON yarnLock;
       extraBuildInputs = (lib.flatten (builtins.map (key:
         pkgConfig.${key} . buildInputs or []
       ) (builtins.attrNames pkgConfig)));
@@ -60,7 +83,7 @@ in rec {
     stdenv.mkDerivation {
       inherit name preBuild;
       phases = ["configurePhase" "buildPhase"];
-      buildInputs = [ yarn nodejs ] ++ extraBuildInputs;
+      buildInputs = [ yarn nodejs git ] ++ extraBuildInputs;
 
       configurePhase = ''
         # Yarn writes cache directories etc to $HOME.
@@ -78,8 +101,13 @@ in rec {
 
         # Do not look up in the registry, but in the offline cache.
         # TODO: Ask upstream to fix this mess.
+        sed -i -E 's|^(\s*resolved\s*")https://registry.yarnpkg.com/@([^/]+)/.*/|\1@\2-|' yarn.lock
         sed -i -E 's|^(\s*resolved\s*")https?://.*/|\1|' yarn.lock
         yarn install ${lib.escapeShellArgs yarnFlags}
+        patchShebangs node_modules
+        #substituteInPlace node_modules/electron-chromedriver/package.json --replace '"install": "node ./download-chromedriver.js",' ""
+        #yarn install --offline --frozen-lockfile --ignore-engines
+
 
         ${lib.concatStringsSep "\n" postInstall}
 
@@ -155,6 +183,11 @@ in rec {
         fi
 
         runHook postConfigure
+      '';
+
+      buildPhase = ''
+        export HOME=$PWD/yarn_home
+        yarn run build --offline
       '';
 
       # Replace this phase on frontend packages where only the generated
